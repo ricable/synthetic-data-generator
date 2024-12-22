@@ -33,9 +33,12 @@ from synthetic_dataset_generator.pipelines.embeddings import (
     get_sentence_embedding_dimensions,
 )
 from synthetic_dataset_generator.pipelines.rag import (
+    DEFAULT_DATASET_DESCRIPTIONS,
+    get_chunks_generator,
+    get_prompt_generator,
     generate_pipeline_code,
     get_sentence_pair_generator,
-    get_response_generator
+    get_response_generator,
 )
 from synthetic_dataset_generator.utils import (
     column_to_list,
@@ -131,6 +134,24 @@ def _preprocess_input_data(file_paths, num_rows):
     )
 
 
+def generate_system_prompt(dataset_description, progress=gr.Progress()):
+    progress(0.0, desc="Starting")
+    progress(0.3, desc="Initializing")
+    generate_description = get_prompt_generator()
+    progress(0.7, desc="Generating")
+    result = next(
+        generate_description.process(
+            [
+                {
+                    "instruction": dataset_description,
+                }
+            ]
+        )
+    )[0]["generation"]
+    progress(1.0, desc="Prompt generated")
+    return result
+
+
 def load_dataset_file(
     repo_id: str,
     file_paths: list[str],
@@ -138,9 +159,6 @@ def load_dataset_file(
     num_rows: int = 10,
     token: Union[OAuthToken, None] = None,
 ):
-    gr.Info(f"Loading dataset from {input_type}")
-    gr.Info(f"Repo ID: {repo_id}")
-    gr.Info(f"File paths: {file_paths}")
     if input_type == "dataset-input":
         return _load_dataset_from_hub(repo_id, num_rows, token)
     else:
@@ -148,7 +166,9 @@ def load_dataset_file(
 
 
 def generate_dataset(
+    input_type: str,
     dataframe: pd.DataFrame,
+    system_prompt: str,
     document_column: str,
     hard_negative: bool = False,
     retrieval: bool = False,
@@ -160,9 +180,16 @@ def generate_dataset(
 ):
     num_rows = test_max_num_rows(num_rows)
     progress(0.0, desc="Generating questions")
-    document_data = column_to_list(dataframe, document_column)
-    if len(document_data) < num_rows:
-        document_data += random.choices(document_data, k=num_rows - len(document_data))
+    if input_type == "prompt-input":
+        chunk_generator = get_chunks_generator(
+            temperature=temperature, is_sample=is_sample
+        )
+    else:
+        document_data = column_to_list(dataframe, document_column)
+        if len(document_data) < num_rows:
+            document_data += random.choices(
+                document_data, k=num_rows - len(document_data)
+            )
 
     retrieval_generator = get_sentence_pair_generator(
         action="query",
@@ -182,9 +209,29 @@ def generate_dataset(
             temperature=temperature,
             is_sample=is_sample,
         )
-    total_steps: int = num_rows * 2 if reranking else 3
-    step_progress = 0.33 if reranking else 0.5
+    steps = 2 + sum([1 if reranking else 0, 1 if input_type == "prompt-type" else 0])
+    total_steps: int = num_rows * steps
+    step_progress = round(1 / steps, 2)
     batch_size = DEFAULT_BATCH_SIZE
+
+    # generate chunks
+    if input_type == "prompt-input":
+        n_processed = 0
+        chunk_results = []
+        while n_processed < num_rows:
+            progress(
+                step_progress * n_processed / num_rows,
+                total=total_steps,
+                desc="Generating chunks",
+            )
+            remaining_rows = num_rows - n_processed
+            batch_size = min(batch_size, remaining_rows)
+            inputs = [{"task": system_prompt} for _ in range(batch_size)]
+            chunks = list(chunk_generator.process(inputs=inputs))
+            chunk_results.extend(chunks[0])
+            n_processed += batch_size
+        document_data = [chunk["generation"] for chunk in chunk_results]
+        progress(step_progress, desc="Generating chunks")
 
     # generate questions
     n_processed = 0
@@ -213,7 +260,6 @@ def generate_dataset(
             result["negative_retrieval"] = result.pop("negative")
         else:
             result["question"] = result.pop("positive")
-    gr.Info(f"Result question with keys: {retrieval_results[0].keys()}")
 
     progress(step_progress, desc="Generating questions")
 
@@ -232,7 +278,6 @@ def generate_dataset(
         n_processed += batch_size
     for result in response_results:
         result["response"] = result["generation"]
-    gr.Info(f"Result response with keys: {response_results[0].keys()}")
     progress(step_progress, desc="Generating responses")
 
     # generate reranking
@@ -252,7 +297,6 @@ def generate_dataset(
         for result in reranking_results:
             result["positive_reranking"] = result.pop("positive")
             result["negative_reranking"] = result.pop("negative")
-        gr.Info(f"Result reranking with keys: {reranking_results[0].keys()}")
     progress(
         1,
         total=total_steps,
@@ -281,6 +325,7 @@ def generate_sample_dataset(
     repo_id: str,
     file_paths: list[str],
     input_type: str,
+    system_prompt: str,
     document_column: str,
     hard_negative: bool,
     retrieval: bool,
@@ -288,15 +333,20 @@ def generate_sample_dataset(
     num_rows: str,
     oauth_token: Union[OAuthToken, None],
 ):
-    dataframe, _ = load_dataset_file(
-        repo_id=repo_id,
-        file_paths=file_paths,
-        input_type=input_type,
-        num_rows=num_rows,
-        token=oauth_token,
-    )
+    if input_type == "prompt-input":
+        dataframe = pd.DataFrame(columns=["context", "question", "response"])
+    else:
+        dataframe, _ = load_dataset_file(
+            repo_id=repo_id,
+            file_paths=file_paths,
+            input_type=input_type,
+            num_rows=num_rows,
+            token=oauth_token,
+        )
     dataframe = generate_dataset(
+        input_type=input_type,
         dataframe=dataframe,
+        system_prompt=system_prompt,
         document_column=document_column,
         hard_negative=hard_negative,
         retrieval=retrieval,
@@ -336,6 +386,7 @@ def push_dataset(
     original_repo_id: str,
     file_paths: list[str],
     input_type: str,
+    system_prompt: str,
     document_column: str,
     hard_negative: bool,
     retrieval: bool,
@@ -346,15 +397,18 @@ def push_dataset(
     oauth_token: Union[gr.OAuthToken, None] = None,
     progress=gr.Progress(),
 ) -> pd.DataFrame:
-    dataframe, _ = load_dataset_file(
-        repo_id=original_repo_id,
-        file_paths=file_paths,
-        input_type=input_type,
-        num_rows=num_rows,
-        token=oauth_token,
-    )
+    if input_type != "prompt-input":
+        dataframe, _ = load_dataset_file(
+            repo_id=original_repo_id,
+            file_paths=file_paths,
+            input_type=input_type,
+            num_rows=num_rows,
+            token=oauth_token,
+        )
     dataframe = generate_dataset(
+        input_type=input_type,
         dataframe=dataframe,
+        system_prompt=system_prompt,
         document_column=document_column,
         hard_negative=hard_negative,
         retrieval=retrieval,
@@ -488,6 +542,22 @@ def push_dataset(
     return ""
 
 
+def show_system_prompt_visibility():
+    return {system_prompt: gr.Textbox(visible=True)}
+
+
+def hide_system_prompt_visibility():
+    return {system_prompt: gr.Textbox(visible=False)}
+
+
+def show_document_column_visibility():
+    return {document_column: gr.Dropdown(visible=True)}
+
+
+def hide_document_column_visibility():
+    return {document_column: gr.Dropdown(visible=False)}
+
+
 def show_pipeline_code_visibility():
     return {pipeline_code_ui: gr.Accordion(visible=True)}
 
@@ -508,7 +578,7 @@ with gr.Blocks() as app:
             with gr.Column(scale=2):
                 input_type = gr.Dropdown(
                     label="Input type",
-                    choices=["dataset-input", "file-input"],
+                    choices=["dataset-input", "file-input", "prompt-input"],
                     value="dataset-input",
                     multiselect=False,
                     visible=False,
@@ -540,11 +610,6 @@ with gr.Blocks() as app:
                                 run_on_click=True,
                             )
                             search_out = gr.HTML(label="Dataset preview", visible=False)
-                        tab_dataset_input.select(
-                            fn=lambda: "dataset-input",
-                            inputs=[],
-                            outputs=[input_type],
-                        )
                 with gr.Tab("Load your file") as tab_file_input:
                     with gr.Row(equal_height=False):
                         with gr.Column(scale=2):
@@ -560,17 +625,36 @@ with gr.Blocks() as app:
                                 load_file_btn = gr.Button("Load", variant="primary")
                         with gr.Column(scale=3):
                             file_out = gr.HTML(label="Dataset preview", visible=False)
-                        tab_file_input.select(
-                            fn=lambda: "file-input",
-                            inputs=[],
-                            outputs=[input_type],
-                        )
+                with gr.Tab("Generate from prompt") as tab_prompt_input:
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=2):
+                            dataset_description = gr.Textbox(
+                                label="Dataset description",
+                                placeholder="Give a precise description of your desired dataset.",
+                            )
+                            with gr.Row():
+                                clear_prompt_btn_part = gr.Button(
+                                    "Clear", variant="secondary"
+                                )
+                                load_prompt_btn = gr.Button("Create", variant="primary")
+                        with gr.Column(scale=3):
+                            examples = gr.Examples(
+                                examples=DEFAULT_DATASET_DESCRIPTIONS,
+                                inputs=[dataset_description],
+                                cache_examples=False,
+                                label="Examples",
+                            )
 
         gr.HTML(value="<hr>")
         gr.Markdown(value="## 2. Configure your task")
         with gr.Row(equal_height=True):
             with gr.Row(equal_height=False):
                 with gr.Column(scale=2):
+                    system_prompt = gr.Textbox(
+                        label="System prompt",
+                        placeholder="You are a helpful assistant.",
+                        visible=False,
+                    )
                     document_column = gr.Dropdown(
                         label="Document Column",
                         info="Select the document column to generate the RAG dataset",
@@ -669,6 +753,30 @@ with gr.Blocks() as app:
                         label="Distilabel Pipeline Code",
                     )
 
+    tab_dataset_input.select(
+        fn=lambda: "dataset-input",
+        inputs=[],
+        outputs=[input_type],
+    ).then(fn=hide_system_prompt_visibility, inputs=[], outputs=[system_prompt]).then(
+        fn=show_document_column_visibility, inputs=[], outputs=[document_column]
+    )
+
+    tab_file_input.select(
+        fn=lambda: "file-input",
+        inputs=[],
+        outputs=[input_type],
+    ).then(fn=hide_system_prompt_visibility, inputs=[], outputs=[system_prompt]).then(
+        fn=show_document_column_visibility, inputs=[], outputs=[document_column]
+    )
+
+    tab_prompt_input.select(
+        fn=lambda: "prompt-input",
+        inputs=[],
+        outputs=[input_type],
+    ).then(fn=show_system_prompt_visibility, inputs=[], outputs=[system_prompt]).then(
+        fn=hide_document_column_visibility, inputs=[], outputs=[document_column]
+    )
+
     search_in.submit(fn=get_iframe, inputs=search_in, outputs=search_out).then(
         fn=lambda df: pd.DataFrame(columns=df.columns),
         inputs=[dataframe],
@@ -693,12 +801,34 @@ with gr.Blocks() as app:
         ],
     )
 
+    load_prompt_btn.click(
+        fn=generate_system_prompt,
+        inputs=[dataset_description],
+        outputs=[system_prompt],
+        show_progress=True,
+    ).success(
+        fn=generate_sample_dataset,
+        inputs=[
+            search_in,
+            file_in,
+            input_type,
+            system_prompt,
+            document_column,
+            hard_negative,
+            retrieval,
+            reranking,
+            num_rows,
+        ],
+        outputs=dataframe,
+    )
+
     btn_apply_to_sample_dataset.click(
         fn=generate_sample_dataset,
         inputs=[
             search_in,
             file_in,
             input_type,
+            system_prompt,
             document_column,
             hard_negative,
             retrieval,
@@ -735,6 +865,7 @@ with gr.Blocks() as app:
             search_in,
             file_in,
             input_type,
+            system_prompt,
             document_column,
             hard_negative,
             retrieval,
@@ -769,10 +900,11 @@ with gr.Blocks() as app:
         outputs=[pipeline_code_ui],
     )
 
-    clear_dataset_btn_part.click(
-        fn=lambda x: "", inputs=[], outputs=[search_in, file_in]
-    )
+    clear_dataset_btn_part.click(fn=lambda x: "", inputs=[], outputs=[search_in])
     clear_file_btn_part.click(fn=lambda x: "", inputs=[], outputs=[file_in])
+    clear_prompt_btn_part.click(
+        fn=lambda x: "", inputs=[], outputs=[dataset_description]
+    )
     clear_btn_full.click(
         fn=lambda df: ("", "", pd.DataFrame(columns=df.columns)),
         inputs=[dataframe],
