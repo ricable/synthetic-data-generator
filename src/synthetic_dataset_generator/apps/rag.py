@@ -130,13 +130,17 @@ def _preprocess_input_data(file_paths, num_rows):
         ),
     )
 
+
 def load_dataset_file(
     repo_id: str,
+    file_paths: list[str],
+    input_type: str,
     num_rows: int = 10,
     token: Union[OAuthToken, None] = None,
-    file_paths: list[str] = [],
-    input_type: str = "dataset-input",
 ):
+    gr.Info(f"Loading dataset from {input_type}")
+    gr.Info(f"Repo ID: {repo_id}")
+    gr.Info(f"File paths: {file_paths}")
     if input_type == "dataset-input":
         return _load_dataset_from_hub(repo_id, num_rows, token)
     else:
@@ -163,7 +167,7 @@ def generate_dataset(
     retrieval_generator = get_sentence_pair_generator(
         action="query", triplet=True if retrieval else False, hard_negative=hard_negative, temperature=temperature, is_sample=is_sample
     )
-    response_generator = get_text_generator(document_column=document_column, temperature=temperature, is_sample=is_sample)
+    response_generator = get_text_generator(temperature=temperature, is_sample=is_sample)
     if reranking:
         reranking_generator = get_sentence_pair_generator(
             action="semantically-similar", triplet=True, hard_negative=hard_negative, temperature=temperature, is_sample=is_sample
@@ -189,9 +193,14 @@ def generate_dataset(
         n_processed += batch_size
     for result in retrieval_results:
         result["context"] = result["anchor"]
-        result["question"] = result["positive"]
-        result["positive_retrieval"] = result.pop("positive")
-        result["negative_retrieval"] = result.pop("negative")
+        result["context"] = result["anchor"]
+        if retrieval:
+            result["question"] = result["positive"]
+            result["positive_retrieval"] = result.pop("positive")
+            result["negative_retrieval"] = result.pop("negative")
+        else:
+            result["question"] = result.pop("positive")
+    gr.Info(f"Result question with keys: {retrieval_results[0].keys()}")
 
     progress(step_progress, desc="Generating questions")
 
@@ -210,6 +219,7 @@ def generate_dataset(
         n_processed += batch_size
     for result in response_results:
         result["response"] = result["generation"]
+    gr.Info(f"Result response with keys: {response_results[0].keys()}")
     progress(step_progress, desc="Generating responses")
 
     # generate reranking
@@ -223,12 +233,13 @@ def generate_dataset(
                 desc="Generating reranking data",
             )
             batch = response_results[n_processed : n_processed + batch_size]
-            batch = list(reranking_generator.process(inputs=inputs))
+            batch = list(reranking_generator.process(inputs=batch))
             reranking_results.extend(batch[0])
             n_processed += batch_size
-        for result in response_results:
+        for result in reranking_results:
             result["positive_reranking"] = result.pop("positive")
             result["negative_reranking"] = result.pop("negative")
+        gr.Info(f"Result reranking with keys: {reranking_results[0].keys()}")
     progress(
         1,
         total=total_steps,
@@ -255,16 +266,16 @@ def generate_dataset(
 
 def generate_sample_dataset(
     repo_id: str,
-    num_rows: str,
-    oauth_token: Union[OAuthToken, None],
     file_paths: list[str],
     input_type: str,
     document_column: str,
     hard_negative: bool,
     retrieval: bool,
     reranking: bool,
+    num_rows: str,
+    oauth_token: Union[OAuthToken, None],
 ):
-    dataframe, _ = load_dataset_file(repo_id, num_rows, oauth_token, file_paths,  input_type)
+    dataframe, _ = load_dataset_file(repo_id=repo_id, file_paths=file_paths, input_type=input_type, num_rows=num_rows, token=oauth_token)
     dataframe = generate_dataset(
         dataframe=dataframe,
         document_column=document_column,
@@ -303,7 +314,6 @@ def push_dataset(
     org_name: str,
     repo_name: str,
     private: bool,
-    num_rows: int,
     original_repo_id: str,
     file_paths: list[str],
     input_type: str,
@@ -311,19 +321,20 @@ def push_dataset(
     hard_negative: bool,
     retrieval: bool,
     reranking: bool,
+    num_rows: int,
     temperature: float,
     pipeline_code: str,
     oauth_token: Union[gr.OAuthToken, None] = None,
     progress=gr.Progress(),
 ) -> pd.DataFrame:
-    dataframe, _ = load_dataset_file(original_repo_id, num_rows, file_paths, input_type)
+    dataframe, _ = load_dataset_file(repo_id=original_repo_id, file_paths=file_paths, input_type=input_type, num_rows=num_rows, token=oauth_token)
     dataframe = generate_dataset(
         dataframe=dataframe,
         document_column=document_column,
         hard_negative=hard_negative,
         retrieval=retrieval,
         reranking=reranking,
-        num_rows=10,
+        num_rows=num_rows,
         temperature=temperature,
         is_sample=True,
     )
@@ -336,7 +347,7 @@ def push_dataset(
         client = get_argilla_client()
         if client is None:
             return ""
-        
+
         fields = [
             rg.TextField(
                 name="context",
@@ -418,7 +429,7 @@ def push_dataset(
             vectors=vectors,
             guidelines="Please review the conversation and provide an evaluation.",
         )
-        
+
         dataframe["chat"] = dataframe.apply(
             lambda row: [
                 {"role": "user", "content": row["question"]},
@@ -426,11 +437,10 @@ def push_dataset(
             ],
             axis=1
         )
-        
+
         for item in ["context", "question", "response"]:
             dataframe[f"{item}_length"] = dataframe[item].apply(len)
             dataframe[f"{item}_embeddings"] = get_embeddings(dataframe[item].to_list())
-
 
         progress(0.5, desc="Creating dataset")
         rg_dataset = client.datasets(name=repo_name, workspace=hf_user)
@@ -477,55 +487,56 @@ with gr.Blocks() as app:
                     multiselect=False,
                     visible=False,
                 )
-            with gr.Tab("Load from Hub") as tab_dataset_input:
-                with gr.Column(scale=2):
-                    search_in = HuggingfaceHubSearch(
-                        label="Search",
-                        placeholder="Search for a dataset",
-                        search_type="dataset",
-                        sumbit_on_select=True,
-                    )
-                    with gr.Row():
-                        clear_btn_part = gr.Button("Clear", variant="secondary")
-                        load_btn = gr.Button("Load", variant="primary")
-
-                with gr.Column(scale=3):
-                    examples = gr.Examples(
-                        examples=[
-                            "kuklinmike/wikipedia_en",
-                            "plaguss/argilla_sdk_docs_raw_unstructured",
-                            "BeIR/hotpotqa-generated-queries",
-                        ],
-                        label="Example datasets",
-                        fn=lambda x: x,
-                        inputs=[search_in],
-                        run_on_click=True,
-                    )
-                    search_out = gr.HTML(label="Dataset preview", visible=False)
-                tab_dataset_input.select(
-                    fn=lambda: "dataset-input",
-                    inputs=[],
-                    outputs=[input_type],
-                )
-            with gr.Tab("Load your file") as tab_file_input:
-                with gr.Column(scale=2):
-                    file_in = gr.File(file_count="multiple", label="Upload your file", file_types=[".md", ".txt"])
-                    with gr.Row():
-                        clear_btn_part = gr.Button("Clear", variant="secondary")
-                        load_btn = gr.Button("Load", variant="primary")
-                with gr.Column(scale=3):
-                    search_out = gr.HTML(label="Dataset preview", visible=False)
-                tab_file_input.select(
-                    fn=lambda: "file-input",
-                    inputs=[],
-                    outputs=[input_type],
-                )
+                with gr.Tab("Load from Hub") as tab_dataset_input:
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=2):
+                            search_in = HuggingfaceHubSearch(
+                                label="Search",
+                                placeholder="Search for a dataset",
+                                search_type="dataset",
+                                sumbit_on_select=True,
+                            )
+                            with gr.Row():
+                                clear_dataset_btn_part = gr.Button("Clear", variant="secondary")
+                                load_dataset_btn = gr.Button("Load", variant="primary")
+                        with gr.Column(scale=3):
+                            examples = gr.Examples(
+                                examples=[
+                                    "charris/wikipedia_sample",
+                                    "plaguss/argilla_sdk_docs_raw_unstructured",
+                                    "BeIR/hotpotqa-generated-queries",
+                                ],
+                                label="Example datasets",
+                                fn=lambda x: x,
+                                inputs=[search_in],
+                                run_on_click=True,
+                            )
+                            search_out = gr.HTML(label="Dataset preview", visible=False)
+                        tab_dataset_input.select(
+                            fn=lambda: "dataset-input",
+                            inputs=[],
+                            outputs=[input_type],
+                        )
+                with gr.Tab("Load your file") as tab_file_input:
+                    with gr.Row(equal_height=False):
+                        with gr.Column(scale=2):
+                            file_in = gr.File(file_count="multiple", label="Upload your file", file_types=[".md", ".txt"])
+                            with gr.Row():
+                                clear_file_btn_part = gr.Button("Clear", variant="secondary")
+                                load_file_btn = gr.Button("Load", variant="primary")
+                        with gr.Column(scale=3):
+                            file_out = gr.HTML(label="Dataset preview", visible=False)
+                        tab_file_input.select(
+                            fn=lambda: "file-input",
+                            inputs=[],
+                            outputs=[input_type],
+                        )
 
         gr.HTML(value="<hr>")
         gr.Markdown(value="## 2. Configure your task")
-        with gr.Row(equal_height=False):
-            with gr.Column(scale=2):
-                with gr.Row():
+        with gr.Row(equal_height=True):
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=2):
                     document_column = gr.Dropdown(
                         label="Document Column",
                         info="Select the document column to generate the RAG dataset",
@@ -541,8 +552,6 @@ with gr.Blocks() as app:
                         interactive=True,
                         info="If checked, it will generate hard negative examples.",
                     )
-
-                with gr.Row():
                     retrieval = gr.Checkbox(
                         label="Retrieval",
                         value=False,
@@ -555,15 +564,15 @@ with gr.Blocks() as app:
                         interactive=True,
                         info="If checked, it will generate data for reranking.",
                     )
-                with gr.Row():
-                    clear_btn_full = gr.Button("Clear", variant="secondary")
-                    btn_apply_to_sample_dataset = gr.Button("Save", variant="primary")
-            with gr.Column(scale=3):
-                dataframe = gr.Dataframe(
-                    headers=["context", "query", "response"],
-                    wrap=True,
-                    interactive=False,
-                )
+                    with gr.Row():
+                        clear_btn_full = gr.Button("Clear", variant="secondary")
+                        btn_apply_to_sample_dataset = gr.Button("Save", variant="primary")
+                with gr.Column(scale=3):
+                    dataframe = gr.Dataframe(
+                        headers=["context", "query", "response"],
+                        wrap=True,
+                        interactive=False,
+                    )
 
         gr.HTML(value="<hr>")
         gr.Markdown(value="## 3. Generate your dataset")
@@ -616,7 +625,7 @@ with gr.Blocks() as app:
                         hard_negative=hard_negative.value,
                         num_rows=num_rows.value,
                         temperature=temperature.value,
-                        eval_type=input_type.value,
+                        input_type=input_type.value,
                     )
                     pipeline_code = gr.Code(
                         value=code,
@@ -630,7 +639,16 @@ with gr.Blocks() as app:
         outputs=[dataframe],
     )
 
-    load_btn.click(
+    load_dataset_btn.click(
+        fn=load_dataset_file,
+        inputs=[search_in, file_in, input_type],
+        outputs=[
+            dataframe,
+            document_column,
+        ],
+    )
+
+    load_file_btn.click(
         fn=load_dataset_file,
         inputs=[search_in, file_in, input_type],
         outputs=[
@@ -678,7 +696,6 @@ with gr.Blocks() as app:
             org_name,
             repo_name,
             private,
-            num_rows,
             search_in,
             file_in,
             input_type,
@@ -686,6 +703,7 @@ with gr.Blocks() as app:
             hard_negative,
             retrieval,
             reranking,
+            num_rows,
             temperature,
             pipeline_code,
         ],
@@ -715,7 +733,8 @@ with gr.Blocks() as app:
         outputs=[pipeline_code_ui],
     )
 
-    clear_btn_part.click(fn=lambda x: "", inputs=[], outputs=[search_in, file_in])
+    clear_dataset_btn_part.click(fn=lambda x: "", inputs=[], outputs=[search_in, file_in])
+    clear_file_btn_part.click(fn=lambda x: "", inputs=[], outputs=[file_in])
     clear_btn_full.click(
         fn=lambda df: ("", "", pd.DataFrame(columns=df.columns)),
         inputs=[dataframe],

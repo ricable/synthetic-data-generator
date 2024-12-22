@@ -20,7 +20,7 @@ If you cannot answer the question based on the given information, state that cle
 """
 
 RAG_TEMPLATE = """Document:
-{{ document }}
+{{ context }}
 
 Question: {{ question }}
 
@@ -59,7 +59,7 @@ def get_sentence_pair_generator(action, triplet, hard_negative,  temperature, is
     return sentence_pair_generator
 
 
-def get_text_generator(temperature, is_sample, type):
+def get_text_generator(temperature, is_sample):
     generation_kwargs = {
         "temperature": temperature,
         "max_new_tokens": MAX_NUM_TOKENS if is_sample else 256,
@@ -93,13 +93,13 @@ def get_text_generator(temperature, is_sample, type):
 
 
 def generate_pipeline_code(
-    input_type: str,
-    repo_id:str,
+    repo_id: str,
     file_paths: List[str],
+    input_type: str,
     document_column: str,
+    hard_negative: bool = False,
     retrieval: bool = False,
     reranking: bool = False,
-    hard_negative: bool = False,
     num_rows: int = 10,
     temperature: float = 0.9,
 ) -> str:
@@ -131,7 +131,7 @@ If you cannot answer the question based on the given information, state that cle
 '''
 
 RAG_TEMPLATE = '''Document:
-{{ document }}
+{{ {document_column} }}
 
 Question: {{ question }}
 
@@ -224,7 +224,7 @@ with Pipeline(name="rag") as pipeline:
     )
     """
     # TODO: add https://distilabel.argilla.io/dev/components-gallery/steps/combineoutputs/ when released
-    
+
     if reranking:
         pipeline += """
 load_dataset.connect(generate_retrieval_pairs, generate_reranking_pairs)
