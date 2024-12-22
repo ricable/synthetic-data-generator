@@ -10,7 +10,6 @@ from distilabel.steps.tasks import (
 from synthetic_dataset_generator.constants import BASE_URL, MAX_NUM_TOKENS, MODEL
 from synthetic_dataset_generator.pipelines.base import _get_next_api_key
 
-
 SYSTEM_PROMPT_RAG = """"
 You are a helpful AI assistant. Your task is to answer the following question based on the provided document.
 
@@ -28,7 +27,7 @@ Please provide a clear and concise answer to the question based on the informati
 """.rstrip()
 
 
-def get_sentence_pair_generator(action, triplet, hard_negative,  temperature, is_sample):
+def get_sentence_pair_generator(action, triplet, hard_negative, temperature, is_sample):
     generation_kwargs = {
         "temperature": temperature,
         "max_new_tokens": 256 if is_sample else MAX_NUM_TOKENS,
@@ -59,7 +58,7 @@ def get_sentence_pair_generator(action, triplet, hard_negative,  temperature, is
     return sentence_pair_generator
 
 
-def get_text_generator(temperature, is_sample):
+def get_response_generator(temperature, is_sample):
     generation_kwargs = {
         "temperature": temperature,
         "max_new_tokens": MAX_NUM_TOKENS if is_sample else 256,
@@ -155,7 +154,7 @@ with Pipeline(name="rag") as pipeline:
     load_the_dataset = LoadDataFromDicts(
         data = data,
     )
-    """    
+    """
     else:
         pipeline += f"""
     load_the_dataset = LoadDataFromHub(

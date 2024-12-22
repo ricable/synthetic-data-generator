@@ -35,7 +35,7 @@ from synthetic_dataset_generator.pipelines.embeddings import (
 from synthetic_dataset_generator.pipelines.rag import (
     generate_pipeline_code,
     get_sentence_pair_generator,
-    get_text_generator
+    get_response_generator
 )
 from synthetic_dataset_generator.utils import (
     column_to_list,
@@ -165,12 +165,22 @@ def generate_dataset(
         document_data += random.choices(document_data, k=num_rows - len(document_data))
 
     retrieval_generator = get_sentence_pair_generator(
-        action="query", triplet=True if retrieval else False, hard_negative=hard_negative, temperature=temperature, is_sample=is_sample
+        action="query",
+        triplet=True if retrieval else False,
+        hard_negative=hard_negative,
+        temperature=temperature,
+        is_sample=is_sample,
     )
-    response_generator = get_text_generator(temperature=temperature, is_sample=is_sample)
+    response_generator = get_response_generator(
+        temperature=temperature, is_sample=is_sample
+    )
     if reranking:
         reranking_generator = get_sentence_pair_generator(
-            action="semantically-similar", triplet=True, hard_negative=hard_negative, temperature=temperature, is_sample=is_sample
+            action="semantically-similar",
+            triplet=True,
+            hard_negative=hard_negative,
+            temperature=temperature,
+            is_sample=is_sample,
         )
     total_steps: int = num_rows * 2 if reranking else 3
     step_progress = 0.33 if reranking else 0.5
@@ -187,7 +197,10 @@ def generate_dataset(
         )
         remaining_rows = num_rows - n_processed
         batch_size = min(batch_size, remaining_rows)
-        inputs = [{"anchor": document} for document in document_data[n_processed : n_processed + batch_size]]
+        inputs = [
+            {"anchor": document}
+            for document in document_data[n_processed : n_processed + batch_size]
+        ]
         questions = list(retrieval_generator.process(inputs=inputs))
         retrieval_results.extend(questions[0])
         n_processed += batch_size
@@ -275,14 +288,20 @@ def generate_sample_dataset(
     num_rows: str,
     oauth_token: Union[OAuthToken, None],
 ):
-    dataframe, _ = load_dataset_file(repo_id=repo_id, file_paths=file_paths, input_type=input_type, num_rows=num_rows, token=oauth_token)
+    dataframe, _ = load_dataset_file(
+        repo_id=repo_id,
+        file_paths=file_paths,
+        input_type=input_type,
+        num_rows=num_rows,
+        token=oauth_token,
+    )
     dataframe = generate_dataset(
         dataframe=dataframe,
         document_column=document_column,
         hard_negative=hard_negative,
         retrieval=retrieval,
         reranking=reranking,
-        num_rows=1, # TODO: 10
+        num_rows=1,  # TODO: 10
         is_sample=True,
     )
     return dataframe
@@ -327,7 +346,13 @@ def push_dataset(
     oauth_token: Union[gr.OAuthToken, None] = None,
     progress=gr.Progress(),
 ) -> pd.DataFrame:
-    dataframe, _ = load_dataset_file(repo_id=original_repo_id, file_paths=file_paths, input_type=input_type, num_rows=num_rows, token=oauth_token)
+    dataframe, _ = load_dataset_file(
+        repo_id=original_repo_id,
+        file_paths=file_paths,
+        input_type=input_type,
+        num_rows=num_rows,
+        token=oauth_token,
+    )
     dataframe = generate_dataset(
         dataframe=dataframe,
         document_column=document_column,
@@ -358,7 +383,7 @@ def push_dataset(
                 name="chat",
                 title="Chat",
                 description="User and assistant conversation based on the context",
-            )
+            ),
         ]
         for item in ["positive", "negative"]:
             if retrieval:
@@ -412,15 +437,16 @@ def push_dataset(
         metadata = [
             rg.IntegerMetadataProperty(
                 name=f"{item}_length", title=f"{item.capitalize()} length"
-            ) for item in ["context", "question", "response"]
+            )
+            for item in ["context", "question", "response"]
         ]
 
         vectors = [
             rg.VectorField(
                 name=f"{item}_embeddings",
                 dimensions=get_sentence_embedding_dimensions(),
-            ) for item in ["context", "question", "response"]
-            
+            )
+            for item in ["context", "question", "response"]
         ]
         settings = rg.Settings(
             fields=fields,
@@ -433,9 +459,9 @@ def push_dataset(
         dataframe["chat"] = dataframe.apply(
             lambda row: [
                 {"role": "user", "content": row["question"]},
-                {"role": "assistant", "content": row["response"]}
+                {"role": "assistant", "content": row["response"]},
             ],
-            axis=1
+            axis=1,
         )
 
         for item in ["context", "question", "response"]:
@@ -497,7 +523,9 @@ with gr.Blocks() as app:
                                 sumbit_on_select=True,
                             )
                             with gr.Row():
-                                clear_dataset_btn_part = gr.Button("Clear", variant="secondary")
+                                clear_dataset_btn_part = gr.Button(
+                                    "Clear", variant="secondary"
+                                )
                                 load_dataset_btn = gr.Button("Load", variant="primary")
                         with gr.Column(scale=3):
                             examples = gr.Examples(
@@ -520,9 +548,15 @@ with gr.Blocks() as app:
                 with gr.Tab("Load your file") as tab_file_input:
                     with gr.Row(equal_height=False):
                         with gr.Column(scale=2):
-                            file_in = gr.File(file_count="multiple", label="Upload your file", file_types=[".md", ".txt"])
+                            file_in = gr.File(
+                                file_count="multiple",
+                                label="Upload your file",
+                                file_types=[".md", ".txt"],
+                            )
                             with gr.Row():
-                                clear_file_btn_part = gr.Button("Clear", variant="secondary")
+                                clear_file_btn_part = gr.Button(
+                                    "Clear", variant="secondary"
+                                )
                                 load_file_btn = gr.Button("Load", variant="primary")
                         with gr.Column(scale=3):
                             file_out = gr.HTML(label="Dataset preview", visible=False)
@@ -566,7 +600,9 @@ with gr.Blocks() as app:
                     )
                     with gr.Row():
                         clear_btn_full = gr.Button("Clear", variant="secondary")
-                        btn_apply_to_sample_dataset = gr.Button("Save", variant="primary")
+                        btn_apply_to_sample_dataset = gr.Button(
+                            "Save", variant="primary"
+                        )
                 with gr.Column(scale=3):
                     dataframe = gr.Dataframe(
                         headers=["context", "query", "response"],
@@ -587,7 +623,7 @@ with gr.Blocks() as app:
                 )
                 num_rows = gr.Number(
                     label="Number of rows",
-                    value=1, # TODO: 10
+                    value=1,  # TODO: 10
                     interactive=True,
                     scale=1,
                 )
@@ -733,7 +769,9 @@ with gr.Blocks() as app:
         outputs=[pipeline_code_ui],
     )
 
-    clear_dataset_btn_part.click(fn=lambda x: "", inputs=[], outputs=[search_in, file_in])
+    clear_dataset_btn_part.click(
+        fn=lambda x: "", inputs=[], outputs=[search_in, file_in]
+    )
     clear_file_btn_part.click(fn=lambda x: "", inputs=[], outputs=[file_in])
     clear_btn_full.click(
         fn=lambda df: ("", "", pd.DataFrame(columns=df.columns)),
